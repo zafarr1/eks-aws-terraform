@@ -13,7 +13,7 @@ default = "demo-eks"
 
 
 variable "kubernetes_version" {
-description = "Kubernetes version for EKS"
-type = string
-default = "1.29"
+  description = "Kubernetes version for EKS"
+  type        = string
+  default     = "1.33"
 }
