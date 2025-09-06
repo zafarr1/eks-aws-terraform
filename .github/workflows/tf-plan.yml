@@ -1,0 +1,71 @@
+name: tf-apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      plan_commit_sha:
+        description: "Commit SHA whose plan to apply (defaults to current commit)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  PLAN_BUCKET: plan-bucket-zaf
+  # Optional TF backend flags if not in code:
+  # TF_BACKEND_CONFIG: "-backend-config=bucket=my-tf-state-bucket -backend-config=key=terraform.tfstate -backend-config=region=us-east-1 -backend-config=dynamodb_table=my-tf-locks"
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform 1.13.1
+        run: |
+          sudo apt-get update && sudo apt-get install -y unzip
+          curl -LO "https://releases.hashicorp.com/terraform/1.13.1/terraform_1.13.1_linux_amd64.zip"
+          unzip terraform_1.13.1_linux_amd64.zip
+          sudo mv terraform /usr/local/bin/
+          terraform -version
+
+      - name: Determine Commit SHA
+        id: commit
+        run: |
+          if [ -n "${{ github.event.inputs.plan_commit_sha }}" ]; then
+            echo "sha=${{ github.event.inputs.plan_commit_sha }}" >> $GITHUB_OUTPUT
+          else
+            echo "sha=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download plan & checksum from S3
+        run: |
+          PLAN_PREFIX="${{ github.repository }}#${{ steps.commit.outputs.sha }}"
+          aws s3 cp "s3://${{ env.PLAN_BUCKET }}/${PLAN_PREFIX}/plan.tfplan" ./plan.tfplan
+          aws s3 cp "s3://${{ env.PLAN_BUCKET }}/${PLAN_PREFIX}/plan.tfplan.sha256" ./plan.tfplan.sha256
+
+      - name: Verify checksum
+        run: |
+          DOWN_HASH="$(sha256sum plan.tfplan | awk '{print $1}')"
+          EXP_HASH="$(cat plan.tfplan.sha256)"
+          if [ "$DOWN_HASH" != "$EXP_HASH" ]; then
+            echo "Checksum mismatch! expected=$EXP_HASH got=$DOWN_HASH"
+            exit 1
+          fi
+
+      - name: Terraform Init
+        run: |
+            terraform init -input=false
+
+      - name: Terraform Apply (from binary plan)
+        run: terraform apply -input=false plan.tfplan
