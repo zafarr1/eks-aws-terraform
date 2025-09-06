@@ -5,12 +5,10 @@ resource "aws_vpc" "this" {
   tags                 = merge(local.tags, { Name = "${var.cluster_name}-vpc" })
 }
 
-
 resource "aws_internet_gateway" "this" {
   vpc_id = aws_vpc.this.id
   tags   = merge(local.tags, { Name = "${var.cluster_name}-igw" })
 }
-
 
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.this.id
@@ -20,7 +18,6 @@ resource "aws_route_table" "public" {
   }
   tags = merge(local.tags, { Name = "${var.cluster_name}-public-rt" })
 }
-
 
 resource "aws_subnet" "public" {
   count                   = 2
@@ -34,7 +31,6 @@ resource "aws_subnet" "public" {
     "kubernetes.io/cluster/${var.cluster_name}" = "shared"
   })
 }
-
 
 resource "aws_route_table_association" "public" {
   count          = 2
