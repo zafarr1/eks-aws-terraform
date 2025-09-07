@@ -1,0 +1,190 @@
+name: tf-multistage-aws
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}  # allow manual re-runs of the whole pipeline
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  PLAN_BUCKET: plan-bucket-zaf
+  DESTROY_SUBPATH: destroy
+
+jobs:
+  # -------------------------------------------------
+  # 1) PLAN (auto on push)
+  # -------------------------------------------------
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Terraform 1.13.1
+        run: |
+          sudo apt-get update && sudo apt-get install -y unzip
+          curl -LO "https://releases.hashicorp.com/terraform/1.13.1/terraform_1.13.1_linux_amd64.zip"
+          unzip terraform_1.13.1_linux_amd64.zip
+          sudo mv terraform /usr/local/bin/
+          terraform -version
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -input=false -out=plan.tfplan
+
+      - name: Checksum plan
+        run: sha256sum plan.tfplan | awk '{print $1}' > plan.tfplan.sha256
+
+      - name: Upload plan to S3
+        run: |
+          SAFE_PREFIX="${{ github.repository }}-${{ github.sha }}"
+          aws s3 cp plan.tfplan s3://${PLAN_BUCKET}/${SAFE_PREFIX}/plan.tfplan --sse AES256
+          aws s3 cp plan.tfplan.sha256 s3://${PLAN_BUCKET}/${SAFE_PREFIX}/plan.tfplan.sha256 --sse AES256
+
+  # -------------------------------------------------
+  # 2) APPLY (manual approval gate)
+  # -------------------------------------------------
+  apply:
+    needs: [plan]
+    runs-on: ubuntu-latest
+    environment: apply   # <-- creates the approval gate in GitHub Environments
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Terraform 1.13.1
+        run: |
+          sudo apt-get update && sudo apt-get install -y unzip
+          curl -LO "https://releases.hashicorp.com/terraform/1.13.1/terraform_1.13.1_linux_amd64.zip"
+          unzip terraform_1.13.1_linux_amd64.zip
+          sudo mv terraform /usr/local/bin/
+          terraform -version
+
+      - name: Download plan from S3
+        run: |
+          SAFE_PREFIX="${{ github.repository }}-${{ github.sha }}"
+          aws s3 cp s3://${PLAN_BUCKET}/${SAFE_PREFIX}/plan.tfplan ./plan.tfplan
+          aws s3 cp s3://${PLAN_BUCKET}/${SAFE_PREFIX}/plan.tfplan.sha256 ./plan.tfplan.sha256
+
+      - name: Verify checksum
+        run: |
+          DOWN_HASH="$(sha256sum plan.tfplan | awk '{print $1}')"
+          EXP_HASH="$(cat plan.tfplan.sha256)"
+          if [ "$DOWN_HASH" != "$EXP_HASH" ]; then
+            echo "Checksum mismatch! expected=$EXP_HASH got=$DOWN_HASH"
+            exit 1
+          fi
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Apply
+        run: terraform apply -input=false plan.tfplan
+
+  # -------------------------------------------------
+  # 3) DESTROY PLAN (auto after apply)
+  # -------------------------------------------------
+  destroy-plan:
+    needs: [apply]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Terraform 1.13.1
+        run: |
+          sudo apt-get update && sudo apt-get install -y unzip
+          curl -LO "https://releases.hashicorp.com/terraform/1.13.1/terraform_1.13.1_linux_amd64.zip"
+          unzip terraform_1.13.1_linux_amd64.zip
+          sudo mv terraform /usr/local/bin/
+          terraform -version
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Create Destroy Plan
+        run: terraform plan -destroy -input=false -out=destroy.tfplan
+
+      - name: Checksum Destroy Plan
+        run: sha256sum destroy.tfplan | awk '{print $1}' > destroy.tfplan.sha256
+
+      - name: Upload Destroy Plan
+        run: |
+          SAFE_PREFIX="${{ github.repository }}-${{ github.sha }}"
+          aws s3 cp destroy.tfplan s3://${PLAN_BUCKET}/${SAFE_PREFIX}/${DESTROY_SUBPATH}/destroy.tfplan --sse AES256
+          aws s3 cp destroy.tfplan.sha256 s3://${PLAN_BUCKET}/${SAFE_PREFIX}/${DESTROY_SUBPATH}/destroy.tfplan.sha256 --sse AES256
+
+  # -------------------------------------------------
+  # 4) DESTROY APPLY (manual approval gate)
+  # -------------------------------------------------
+  destroy-apply:
+    needs: [destroy-plan]
+    runs-on: ubuntu-latest
+    environment: destroy-apply   # <-- second approval gate in GitHub Environments
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Terraform 1.13.1
+        run: |
+          sudo apt-get update && sudo apt-get install -y unzip
+          curl -LO "https://releases.hashicorp.com/terraform/1.13.1/terraform_1.13.1_linux_amd64.zip"
+          unzip terraform_1.13.1_linux_amd64.zip
+          sudo mv terraform /usr/local/bin/
+          terraform -version
+
+      - name: Download Destroy Plan
+        run: |
+          SAFE_PREFIX="${{ github.repository }}-${{ github.sha }}"
+          aws s3 cp s3://${PLAN_BUCKET}/${SAFE_PREFIX}/${DESTROY_SUBPATH}/destroy.tfplan ./destroy.tfplan
+          aws s3 cp s3://${PLAN_BUCKET}/${SAFE_PREFIX}/${DESTROY_SUBPATH}/destroy.tfplan.sha256 ./destroy.tfplan.sha256
+
+      - name: Verify destroy plan checksum
+        run: |
+          DOWN_HASH="$(sha256sum destroy.tfplan | awk '{print $1}')"
+          EXP_HASH="$(cat destroy.tfplan.sha256)"
+          if [ "$DOWN_HASH" != "$EXP_HASH" ]; then
+            echo "Checksum mismatch! expected=$EXP_HASH got=$DOWN_HASH"; exit 1
+          fi
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Destroy Apply
+        run: terraform apply -input=false destroy.tfplan
